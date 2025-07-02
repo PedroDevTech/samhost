@@ -18,65 +18,68 @@ const sanitizeFilename = (filename) => {
     .trim();
 };
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const userId = req.user?.id;
-    const folderId = req.body.folder_id; // Mantém folder_id no form data
-    
-    if (!userId || !folderId) {
-      return cb(new Error('Usuário ou pasta não identificados'));
-    }
+// Configurar multer DEPOIS da autenticação
+const createMulterConfig = () => {
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      const userId = req.user?.id;
+      const folderId = req.body.folder_id;
+      
+      if (!userId || !folderId) {
+        return cb(new Error('Usuário ou pasta não identificados'));
+      }
 
-    const uploadPath = path.join('uploads', userId, folderId);
-    
-    // Criar diretório se não existir
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
+      const uploadPath = path.join('uploads', userId, folderId);
+      
+      // Criar diretório se não existir
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      // Sanitizar nome do arquivo
+      const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+      const sanitizedName = sanitizeFilename(originalName);
+      const timestamp = Date.now();
+      const extension = path.extname(sanitizedName);
+      const nameWithoutExt = path.basename(sanitizedName, extension);
+      
+      const finalName = `${timestamp}-${nameWithoutExt}${extension}`;
+      cb(null, finalName);
     }
-    
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    // Sanitizar nome do arquivo
-    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    const sanitizedName = sanitizeFilename(originalName);
-    const timestamp = Date.now();
-    const extension = path.extname(sanitizedName);
-    const nameWithoutExt = path.basename(sanitizedName, extension);
-    
-    const finalName = `${timestamp}-${nameWithoutExt}${extension}`;
-    cb(null, finalName);
-  }
-});
+  });
 
-const upload = multer({ 
-  storage,
-  limits: {
-    fileSize: 2 * 1024 * 1024 * 1024 // 2GB
-  },
-  fileFilter: (req, file, cb) => {
-    // Verificar se é arquivo de vídeo
-    const allowedMimes = [
-      'video/mp4',
-      'video/avi',
-      'video/mkv',
-      'video/mov',
-      'video/wmv',
-      'video/flv',
-      'video/webm',
-      'video/m4v',
-      'video/3gp',
-      'video/mpg',
-      'video/mpeg'
-    ];
-    
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Apenas arquivos de vídeo são permitidos'));
+  return multer({ 
+    storage,
+    limits: {
+      fileSize: 2 * 1024 * 1024 * 1024 // 2GB
+    },
+    fileFilter: (req, file, cb) => {
+      // Verificar se é arquivo de vídeo
+      const allowedMimes = [
+        'video/mp4',
+        'video/avi',
+        'video/mkv',
+        'video/mov',
+        'video/wmv',
+        'video/flv',
+        'video/webm',
+        'video/m4v',
+        'video/3gp',
+        'video/mpg',
+        'video/mpeg'
+      ];
+      
+      if (allowedMimes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Apenas arquivos de vídeo são permitidos'));
+      }
     }
-  }
-});
+  });
+};
 
 router.get('/', supabaseAuthMiddleware, async (req, res) => {
   try {
@@ -242,87 +245,104 @@ router.delete('/:id', supabaseAuthMiddleware, async (req, res) => {
   }
 });
 
-router.post('/upload', supabaseAuthMiddleware, upload.single('video'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-    }
-
-    const { folder_id } = req.body; // Recebe folder_id do frontend
-    const id_user = req.user.id;
-    const parsedFolderId = parseInt(folder_id, 10);
-
-    if (isNaN(parsedFolderId)) {
-      // Remover arquivo se erro
-      if (fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
+// Upload de vídeos - APLICAR AUTENTICAÇÃO PRIMEIRO, DEPOIS MULTER
+router.post('/upload', supabaseAuthMiddleware, (req, res, next) => {
+  // Criar configuração do multer APÓS a autenticação
+  const upload = createMulterConfig();
+  
+  // Aplicar o middleware do multer
+  upload.single('video')(req, res, async (err) => {
+    if (err) {
+      console.error('Erro no multer:', err);
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: 'Arquivo muito grande. Máximo 2GB.' });
+        }
       }
-      return res.status(400).json({ error: 'Parâmetro folder_id inválido' });
+      return res.status(400).json({ error: err.message });
     }
 
-    // Verificar se a pasta pertence ao usuário
-    const { data: folder, error: folderError } = await supabase
-      .from('folders')
-      .select('id')
-      .eq('id', parsedFolderId)
-      .eq('id_user', id_user)
-      .single();
-
-    if (folderError || !folder) {
-      // Remover arquivo se erro
-      if (fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-      return res.status(403).json({ error: 'Pasta não encontrada ou não pertence ao usuário' });
-    }
-
-    let duration = 0;
-    let size = req.file.size;
-
-    // Tentar obter metadados do vídeo
     try {
-      const metadata = await ffprobePromise(req.file.path);
-      duration = Math.floor(metadata.format.duration || 0);
-    } catch (metadataError) {
-      console.warn('Não foi possível obter metadados do vídeo:', metadataError.message);
-      // Continuar sem a duração
-    }
+      if (!req.file) {
+        return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+      }
 
-    // Gerar URL relativa para o vídeo
-    const relativePath = path.relative('uploads', req.file.path).replace(/\\/g, '/');
-    const videoUrl = `/uploads/${relativePath}`;
+      const { folder_id } = req.body;
+      const id_user = req.user.id;
+      const parsedFolderId = parseInt(folder_id, 10);
 
-    // Salvar no banco de dados usando id_folder (campo correto do Supabase)
-    const { data, error } = await supabase
-      .from('videos')
-      .insert([{
-        nome: sanitizeFilename(req.file.originalname),
-        filename: req.file.filename,
-        id_folder: parsedFolderId, // Usar id_folder para o Supabase
-        id_user: id_user,
-        duracao: duration,
-        tamanho: size,
-        url: videoUrl,
-      }])
-      .select();
+      if (isNaN(parsedFolderId)) {
+        // Remover arquivo se erro
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(400).json({ error: 'Parâmetro folder_id inválido' });
+      }
 
-    if (error) {
-      // Remover arquivo se erro no banco
-      if (fs.existsSync(req.file.path)) {
+      // Verificar se a pasta pertence ao usuário
+      const { data: folder, error: folderError } = await supabase
+        .from('folders')
+        .select('id')
+        .eq('id', parsedFolderId)
+        .eq('id_user', id_user)
+        .single();
+
+      if (folderError || !folder) {
+        // Remover arquivo se erro
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(403).json({ error: 'Pasta não encontrada ou não pertence ao usuário' });
+      }
+
+      let duration = 0;
+      let size = req.file.size;
+
+      // Tentar obter metadados do vídeo
+      try {
+        const metadata = await ffprobePromise(req.file.path);
+        duration = Math.floor(metadata.format.duration || 0);
+      } catch (metadataError) {
+        console.warn('Não foi possível obter metadados do vídeo:', metadataError.message);
+        // Continuar sem a duração
+      }
+
+      // Gerar URL relativa para o vídeo
+      const relativePath = path.relative('uploads', req.file.path).replace(/\\/g, '/');
+      const videoUrl = `/uploads/${relativePath}`;
+
+      // Salvar no banco de dados usando id_folder (campo correto do Supabase)
+      const { data, error } = await supabase
+        .from('videos')
+        .insert([{
+          nome: sanitizeFilename(req.file.originalname),
+          filename: req.file.filename,
+          id_folder: parsedFolderId, // Usar id_folder para o Supabase
+          id_user: id_user,
+          duracao: duration,
+          tamanho: size,
+          url: videoUrl,
+        }])
+        .select();
+
+      if (error) {
+        // Remover arquivo se erro no banco
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        throw error;
+      }
+
+      res.status(201).json(data[0]);
+    } catch (err) {
+      // Remover arquivo em caso de erro
+      if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
-      throw error;
+      console.error('Erro no upload:', err);
+      res.status(500).json({ error: 'Erro no processamento do vídeo', details: err.message });
     }
-
-    res.status(201).json(data[0]);
-  } catch (err) {
-    // Remover arquivo em caso de erro
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    console.error('Erro no upload:', err);
-    res.status(500).json({ error: 'Erro no processamento do vídeo', details: err.message });
-  }
+  });
 });
 
 export default router;
