@@ -11,7 +11,7 @@ type Folder = {
 type Video = {
   id: number;
   nome: string;
-  folder_id: number;
+  id_folder: number; // Usar id_folder para consistência com o banco
   duracao?: number;
   tamanho?: number;
   url?: string;
@@ -283,7 +283,7 @@ export default function GerenciarVideos() {
       for (const file of Array.from(uploadFiles)) {
         const formData = new FormData();
         formData.append("video", file);
-        formData.append("folder_id", folderSelecionada.id.toString());
+        formData.append("folder_id", folderSelecionada.id.toString()); // Enviar folder_id
         const duracao = await getVideoDuration(file);
         formData.append("duracao", duracao.toString());
         formData.append("tamanho", file.size.toString());

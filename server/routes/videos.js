@@ -21,7 +21,7 @@ const sanitizeFilename = (filename) => {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const userId = req.user?.id;
-    const folderId = req.body.folder_id;
+    const folderId = req.body.folder_id; // Mantém folder_id no form data
     
     if (!userId || !folderId) {
       return cb(new Error('Usuário ou pasta não identificados'));
@@ -248,7 +248,7 @@ router.post('/upload', supabaseAuthMiddleware, upload.single('video'), async (re
       return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
     }
 
-    const { folder_id } = req.body;
+    const { folder_id } = req.body; // Recebe folder_id do frontend
     const id_user = req.user.id;
     const parsedFolderId = parseInt(folder_id, 10);
 
@@ -292,13 +292,13 @@ router.post('/upload', supabaseAuthMiddleware, upload.single('video'), async (re
     const relativePath = path.relative('uploads', req.file.path).replace(/\\/g, '/');
     const videoUrl = `/uploads/${relativePath}`;
 
-    // Salvar no banco de dados
+    // Salvar no banco de dados usando id_folder (campo correto do Supabase)
     const { data, error } = await supabase
       .from('videos')
       .insert([{
         nome: sanitizeFilename(req.file.originalname),
         filename: req.file.filename,
-        id_folder: parsedFolderId,
+        id_folder: parsedFolderId, // Usar id_folder para o Supabase
         id_user: id_user,
         duracao: duration,
         tamanho: size,
