@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronLeft, Server, Upload, Eye, EyeOff, AlertCircle, CheckCircle, Download, Folder, Play, Trash2 } from 'lucide-react';
+import { ChevronLeft, Server, Upload, Eye, EyeOff, AlertCircle, CheckCircle, Download, Folder, Play, Trash2, FolderOpen, Video } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { useAuth } from '../../context/AuthContext';
@@ -17,6 +17,13 @@ interface FTPFile {
   type: 'file' | 'directory';
   path: string;
   isVideo: boolean;
+}
+
+interface FTPVideo {
+  name: string;
+  path: string;
+  size: number;
+  directory: string;
 }
 
 interface Folder {
@@ -51,6 +58,10 @@ const MigrarVideosFTP: React.FC = () => {
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationProgress, setMigrationProgress] = useState<MigrationProgress[]>([]);
   const [showMigrationModal, setShowMigrationModal] = useState(false);
+  const [scanningDirectory, setScanningDirectory] = useState(false);
+  const [directoryVideos, setDirectoryVideos] = useState<FTPVideo[]>([]);
+  const [showDirectoryModal, setShowDirectoryModal] = useState(false);
+  const [selectedDirectoryPath, setSelectedDirectoryPath] = useState('');
 
   useEffect(() => {
     loadFolders();
@@ -141,6 +152,45 @@ const MigrarVideosFTP: React.FC = () => {
     }
   };
 
+  const scanDirectoryForVideos = async (directoryPath: string) => {
+    setScanningDirectory(true);
+    try {
+      const token = await getToken();
+      const response = await fetch('/api/ftp/scan-directory', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          ftpConnection: ftpData,
+          directoryPath
+        })
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        setDirectoryVideos(result.videos || []);
+        setSelectedDirectoryPath(directoryPath);
+        setShowDirectoryModal(true);
+        
+        if (result.videos.length === 0) {
+          toast.info('Nenhum vídeo encontrado nesta pasta');
+        } else {
+          toast.success(`${result.videos.length} vídeo(s) encontrado(s) na pasta`);
+        }
+      } else {
+        toast.error(result.error || 'Erro ao escanear diretório');
+      }
+    } catch (error) {
+      console.error('Erro ao escanear diretório:', error);
+      toast.error('Erro ao escanear diretório');
+    } finally {
+      setScanningDirectory(false);
+    }
+  };
+
   const toggleFileSelection = (filePath: string) => {
     setSelectedFiles(prev => {
       if (prev.includes(filePath)) {
@@ -154,6 +204,12 @@ const MigrarVideosFTP: React.FC = () => {
   const selectAllVideos = () => {
     const videoFiles = ftpFiles.filter(f => f.type === 'file' && f.isVideo).map(f => f.path);
     setSelectedFiles(videoFiles);
+  };
+
+  const selectAllDirectoryVideos = () => {
+    const videoPaths = directoryVideos.map(v => v.path);
+    setSelectedFiles(videoPaths);
+    setShowDirectoryModal(false);
   };
 
   const clearSelection = () => {
@@ -184,6 +240,17 @@ const MigrarVideosFTP: React.FC = () => {
 
     try {
       const token = await getToken();
+      
+      // Simular progresso durante o download
+      const progressInterval = setInterval(() => {
+        setMigrationProgress(prev => prev.map(item => {
+          if (item.status === 'pending') {
+            return { ...item, status: 'downloading', progress: Math.min(item.progress + 10, 90) };
+          }
+          return item;
+        }));
+      }, 1000);
+
       const response = await fetch('/api/ftp/migrate', {
         method: 'POST',
         headers: {
@@ -197,10 +264,12 @@ const MigrarVideosFTP: React.FC = () => {
         })
       });
 
+      clearInterval(progressInterval);
+
       const result = await response.json();
 
       if (result.success) {
-        toast.success(`${selectedFiles.length} arquivo(s) migrado(s) com sucesso!`);
+        toast.success(`${result.migratedFiles} de ${result.totalFiles} arquivo(s) migrado(s) com sucesso!`);
         setSelectedFiles([]);
         
         // Atualizar progresso final
@@ -209,6 +278,10 @@ const MigrarVideosFTP: React.FC = () => {
           progress: 100,
           status: 'completed'
         })));
+
+        if (result.errors && result.errors.length > 0) {
+          console.warn('Erros durante a migração:', result.errors);
+        }
       } else {
         toast.error(result.error || 'Erro durante a migração');
         
@@ -238,6 +311,8 @@ const MigrarVideosFTP: React.FC = () => {
     setFtpFiles([]);
     setCurrentPath('/');
     setSelectedFiles([]);
+    setDirectoryVideos([]);
+    setShowDirectoryModal(false);
     setFtpData({
       ip: '',
       usuario: '',
@@ -263,7 +338,7 @@ const MigrarVideosFTP: React.FC = () => {
     if (file.type === 'directory') {
       return <Folder className="h-5 w-5 text-blue-600" />;
     } else if (file.isVideo) {
-      return <Play className="h-5 w-5 text-green-600" />;
+      return <Video className="h-5 w-5 text-green-600" />;
     } else {
       return <div className="h-5 w-5 bg-gray-400 rounded"></div>;
     }
@@ -297,6 +372,7 @@ const MigrarVideosFTP: React.FC = () => {
             <ul className="text-blue-800 text-sm space-y-1">
               <li>• Preencha os dados de conexão FTP do servidor remoto</li>
               <li>• Conecte-se e navegue pelos diretórios para encontrar os vídeos</li>
+              <li>• <strong>NOVO:</strong> Clique no ícone de pasta para escanear recursivamente e encontrar todos os vídeos</li>
               <li>• Selecione os arquivos de vídeo que deseja migrar</li>
               <li>• Escolha a pasta de destino no seu sistema</li>
               <li>• Inicie a migração e acompanhe o progresso</li>
@@ -513,14 +589,25 @@ const MigrarVideosFTP: React.FC = () => {
                           {file.type === 'file' ? formatFileSize(file.size) : '-'}
                         </div>
                         
-                        <div className="col-span-2">
+                        <div className="col-span-2 flex items-center space-x-2">
                           {file.type === 'directory' && (
-                            <button
-                              onClick={() => navigateToDirectory(file.path)}
-                              className="text-primary-600 hover:text-primary-800 text-sm"
-                            >
-                              Abrir
-                            </button>
+                            <>
+                              <button
+                                onClick={() => navigateToDirectory(file.path)}
+                                className="text-primary-600 hover:text-primary-800 text-sm"
+                                title="Abrir pasta"
+                              >
+                                Abrir
+                              </button>
+                              <button
+                                onClick={() => scanDirectoryForVideos(file.path)}
+                                disabled={scanningDirectory}
+                                className="text-green-600 hover:text-green-800 text-sm disabled:opacity-50"
+                                title="Escanear pasta recursivamente"
+                              >
+                                <FolderOpen className="h-4 w-4" />
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -588,6 +675,66 @@ const MigrarVideosFTP: React.FC = () => {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Modal de vídeos encontrados na pasta */}
+      {showDirectoryModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-4xl w-full max-h-[80vh] overflow-hidden">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-semibold">
+                  Vídeos encontrados em: {selectedDirectoryPath}
+                </h3>
+                <button
+                  onClick={() => setShowDirectoryModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  ×
+                </button>
+              </div>
+              <p className="text-sm text-gray-600 mt-2">
+                {directoryVideos.length} vídeo(s) encontrado(s) recursivamente
+              </p>
+            </div>
+            
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              {directoryVideos.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">Nenhum vídeo encontrado nesta pasta</p>
+              ) : (
+                <div className="space-y-2">
+                  {directoryVideos.map((video, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg">
+                      <div className="flex-1">
+                        <div className="font-medium text-gray-900">{video.name}</div>
+                        <div className="text-sm text-gray-500">{video.directory}</div>
+                        <div className="text-xs text-gray-400">{formatFileSize(video.size)}</div>
+                      </div>
+                      <Video className="h-5 w-5 text-green-600" />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {directoryVideos.length > 0 && (
+              <div className="p-6 border-t border-gray-200 flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowDirectoryModal(false)}
+                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={selectAllDirectoryVideos}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                >
+                  Selecionar Todos ({directoryVideos.length})
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
